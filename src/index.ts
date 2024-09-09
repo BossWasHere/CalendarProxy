@@ -247,12 +247,21 @@ const app = express();
 
 app.get('/:formatter/:calendarUrl', formatCalendarHandle);
 
-app.listen(SETTINGS.PORT, () => {
+const server = app.listen(SETTINGS.PORT, () => {
     console.log(`Server listening on port ${SETTINGS.PORT}`);
 });
 
-// intercept SIGINT and gracefully stop the server
-process.on('SIGINT', () => {
+/**
+ * Shutdown the server
+ */
+function shutdown() {
     console.log('Stopping server...');
-    process.exit(0);
-});
+    server.close(() => {
+        console.log('Server stopped');
+        process.exit(0);
+    });
+}
+
+// intercept SIGINT and gracefully stop the server
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
