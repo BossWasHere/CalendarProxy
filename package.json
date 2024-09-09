@@ -1,0 +1,38 @@
+{
+  "name": "calendar-proxy",
+  "version": "1.0.0",
+  "description": "Proxies, caches, and manipulates iCalendar data.",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "lint": "eslint",
+    "precompile": "npm run lint",
+    "compile": "tsc",
+    "start": "node dist/index.js",
+    "clean": "rimraf dist"
+  },
+  "keywords": [
+    "Calendar",
+    "iCalendar"
+  ],
+  "author": "Thomas Stephenson",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.4",
+    "@typescript-eslint/eslint-plugin": "^8.4.0",
+    "@typescript-eslint/parser": "^8.4.0",
+    "eslint": "^9.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "crc-32": "^1.2.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ical.js": "^2.0.1",
+    "node-cache": "^5.1.2",
+    "rimraf": "^6.0.1"
+  }
+}
