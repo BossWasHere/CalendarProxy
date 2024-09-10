@@ -1,6 +1,7 @@
 import axios from 'axios';
 import crc32 from 'crc-32';
 import express from 'express';
+import fs from 'fs';
 import NodeCache from 'node-cache';
 import 'dotenv/config';
 import { Calendar } from './calendar.js';
@@ -40,9 +41,9 @@ interface Settings {
      */
     INCLUDE_EXCEPTIONS: boolean;
     /**
-     * User agent to use when fetching remote calendars
+     * Path to the allowed sites JSON file
      */
-    USER_AGENT?: string;
+    ALLOWED_SITES_PATH: string;
 }
 
 /**
@@ -70,6 +71,7 @@ const DOTENV_DEFAULTS: Settings = {
     FORCE_RELOAD_TIMEOUT: 60 * 5,
     RESPECT_ICAL_REFRESH_INTERVAL: false,
     INCLUDE_EXCEPTIONS: false,
+    ALLOWED_SITES_PATH: 'allowed-sites.json',
 };
 
 const SETTINGS: Settings = {
@@ -79,7 +81,7 @@ const SETTINGS: Settings = {
     FORCE_RELOAD_TIMEOUT: tryParseInt(process.env.FORCE_RELOAD_TIMEOUT, DOTENV_DEFAULTS.FORCE_RELOAD_TIMEOUT),
     RESPECT_ICAL_REFRESH_INTERVAL: process.env.RESPECT_ICAL_REFRESH_INTERVAL === 'true',
     INCLUDE_EXCEPTIONS: process.env.INCLUDE_EXCEPTIONS === 'true',
-    USER_AGENT: process.env.USER_AGENT,
+    ALLOWED_SITES_PATH: process.env.ALLOWED_SITES ?? DOTENV_DEFAULTS.ALLOWED_SITES_PATH,
 };
 
 
@@ -93,6 +95,27 @@ const SETTINGS: Settings = {
 interface CalendarError {
     error: string;
     details: string;
+}
+
+/**
+ * Interface for allowed sites configuration
+ */
+interface AllowedSitesConfig {
+    sites: {
+        name: string;
+        url: string;
+        formatter: string;
+        userAgent: string;
+    }[];
+}
+
+let allowedSites: AllowedSitesConfig;
+try {
+    allowedSites = JSON.parse(fs.readFileSync(SETTINGS.ALLOWED_SITES_PATH, 'utf8'));
+}
+catch {
+    console.error('Failed to load allowed sites configuration');
+    process.exit(1);
 }
 
 /**
@@ -112,12 +135,13 @@ calendarCache.addListener('expired', (key: string, value: Calendar) => {
 /**
  * Fetches the calendar from the remote server and updates the cache if the source has changed
  * @param calendarUrl the URL of the calendar
+ * @param userAgent the user agent to use, or undefined if no user agent should be used
  * @param formatterName the formatter to use, or undefined if no formatter should be used
  * @param lastEntry the last cached calendar entry to return if the source has not changed, or undefined if there is no last entry
  * @returns the updated calendar or an error result
  */
-async function reloadCalendar(calendarUrl: string, formatterName?: string, lastEntry?: Calendar): Promise<Calendar | CalendarError> {
-    const axiosConfig = SETTINGS.USER_AGENT ? {headers: {'User-Agent': SETTINGS.USER_AGENT}} : undefined;
+async function reloadCalendar(calendarUrl: string, userAgent?: string, formatterName?: string, lastEntry?: Calendar): Promise<Calendar | CalendarError> {
+    const axiosConfig = userAgent ? {headers: {'User-Agent': userAgent}} : undefined;
     const response = await axios.get(calendarUrl, axiosConfig);
     if (response.status !== 200) {
         return {
@@ -173,17 +197,18 @@ async function reloadCalendar(calendarUrl: string, formatterName?: string, lastE
  * Gets the calendar from the cache, or fetches it from the remote server if it is not in the cache
  * @param calendarUrl the URL of the calendar
  * @param wantsReload whether to request a forced reload of the calendar
+ * @param userAgent the user agent to use, or undefined if no user agent should be used
  * @param formatter the formatter to use, or undefined if no formatter should be used
  * @returns the calendar or an error result
  */
-function getCalendar(calendarUrl: string, wantsReload: boolean, formatter?: string): Promise<Calendar | CalendarError> {
+function getCalendar(calendarUrl: string, wantsReload: boolean, userAgent?: string, formatter?: string): Promise<Calendar | CalendarError> {
     const cacheEntry = calendarCache.get<Calendar>(calendarUrl);
     if (cacheEntry === undefined) {
-        return reloadCalendar(calendarUrl, formatter);
+        return reloadCalendar(calendarUrl, userAgent, formatter);
     }
 
     if (wantsReload && cacheEntry.shouldReload(SETTINGS.FORCE_RELOAD_TIMEOUT, SETTINGS.RESPECT_ICAL_REFRESH_INTERVAL)) {
-        return reloadCalendar(calendarUrl, formatter, cacheEntry);
+        return reloadCalendar(calendarUrl, userAgent, formatter, cacheEntry);
     }
 
     return Promise.resolve(cacheEntry);
@@ -198,35 +223,34 @@ function getCalendar(calendarUrl: string, wantsReload: boolean, formatter?: stri
  */
 interface CalendarRequest {
     /**
-     * The requested formatter
+     * The requested calendar supplier site
      */
-    formatter: string;
+    site: string;
     /**
-     * The requested calendar URL
+     * The requested calendar target
      */
-    calendarUrl: string;
+    calendarTarget: string;
 }
 
 /**
- * Handles the calendar format request
+ * Handles the calendar format request for a given site
  * @param req the request
  * @param res the response
  * @returns empty promise
  */
-async function formatCalendarHandle(req: express.Request<CalendarRequest>, res: express.Response) {
+async function siteCalendarHandle(req: express.Request<CalendarRequest>, res: express.Response) {
     const wantsReload = req.query.reload === 'true';
-    let formatter: string | undefined = req.params.formatter;
-    if (formatter === 'default') {
-        formatter = undefined;
-    }
+    const site = req.params.site;
 
-    const calendarUrl = req.params.calendarUrl;
-    if (!calendarUrl.startsWith('http:') && !calendarUrl.startsWith('https:')) {
-        res.status(400).send({error: 'Requires HTTP or HTTPS protocol'});
+    const siteConfig = allowedSites.sites.find(s => s.name === site);
+    if (siteConfig === undefined) {
+        res.status(400).send({error: 'Invalid site'});
         return;
     }
 
-    const calendar = await getCalendar(calendarUrl, wantsReload, formatter);
+    const calendarUrl = siteConfig.url.replace('{}', req.params.calendarTarget);
+
+    const calendar = await getCalendar(calendarUrl, wantsReload, siteConfig.userAgent, siteConfig.formatter);
     if ('error' in calendar) {
         if (SETTINGS.INCLUDE_EXCEPTIONS) {
             res.status(500).send(calendar);
@@ -245,7 +269,7 @@ async function formatCalendarHandle(req: express.Request<CalendarRequest>, res: 
 
 const app = express();
 
-app.get('/:formatter/:calendarUrl', formatCalendarHandle);
+app.get('/:site/:calendarTarget', siteCalendarHandle);
 
 const server = app.listen(SETTINGS.PORT, () => {
     console.log(`Server listening on port ${SETTINGS.PORT}`);
