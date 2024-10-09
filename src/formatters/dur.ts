@@ -1,8 +1,11 @@
-import { Formatter } from './base.js';
+import ical from 'ical.js';
+
+import { CustomEvent } from '../events/event.js';
+import { ExtractedDetails, Formatter } from './base.js';
 
 const summarySepRegex = /[\w\d]+:\s((?:\w+\s?)+)\s-\s[\w\s]+/;
 const summaryApplyRegex = /([\w\d]+):\s(?:\w+\s?)+\s-\s([\w\s]+)/;
-// const uidRegex = /([\w\d]{6}).*/;
+const uidRegex = /^([\w\d]{6}).*/;
 
 /**
  * DurFormatter implementation
@@ -44,5 +47,34 @@ export class DurFormatter extends Formatter {
 
     getName(): string {
         return 'dur';
+    }
+
+    extractDetails(root: ical.Component): ExtractedDetails {
+        const anyEvent = root.getFirstSubcomponent('vevent');
+        if (!anyEvent) {
+            console.warn('No events in original calendar');
+            return {
+                subject: 'Unknown'
+            };
+        }
+
+        const uid = anyEvent.getFirstPropertyValue('uid');
+        if (typeof uid !== 'string') {
+            console.warn('Invalid UID format from original calendar');
+            return {
+                subject: 'Unknown'
+            };
+        }
+
+        const subject = uid.replace(uidRegex, '$1');
+        return {
+            subject
+        };
+    }
+
+    override getUid(eventView: CustomEvent, details: ExtractedDetails) {
+        const data = `${eventView.dtstamp}${eventView.properties.summary}`;
+        const hashValue = this.hashContent(data).toUpperCase();
+        return `${details.subject}_${hashValue}/CW`;
     }
 }

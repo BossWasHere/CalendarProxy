@@ -1,4 +1,3 @@
-// @ts-expect-error Type declarations for ical.js are missing
 import ical from 'ical.js';
 import { Formatter } from './formatters/index.js';
 

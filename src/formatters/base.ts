@@ -1,6 +1,27 @@
 import crypto from 'crypto';
-// @ts-expect-error Type declarations for ical.js are missing
 import ical from 'ical.js';
+import { CustomEvent, EventPredicate } from '../events/event.js';
+
+/**
+ * Interface for calendar extension configuration
+ */
+export interface CalendarExtensionConfig {
+    /**
+     * Whether to escape special characters in fields
+     */
+    escapeSpecialCharacters?: boolean;
+    /**
+     * Custom events to add to the calendar.
+     */
+    customEvents?: CustomEvent[];
+}
+
+/**
+ * Interface for extracted details from the iCalendar data
+ */
+export interface ExtractedDetails {
+    subject?: string;
+}
 
 /**
  * Defines a replacement for the PRODID field in the iCalendar data
@@ -123,10 +144,22 @@ export abstract class Formatter {
     protected uidFixupConfig?: UidFixupConfig;
 
     /**
+     * The current configuration for calendar extensions
+     */
+    protected extensionConfig?: CalendarExtensionConfig;
+
+    /**
      * Gets the name of the formatter
      * @returns the name of the formatter
      */
     abstract getName(): string;
+
+    /**
+     * Extracts reusable details from the iCalendar data
+     * @param root the data as an iCalendar component (VCALENDAR)
+     * @returns the extracted details
+     */
+    abstract extractDetails(root: ical.Component): ExtractedDetails;
 
     /**
      * Formats the provided iCalendar data
@@ -134,6 +167,8 @@ export abstract class Formatter {
      * @returns the formatted iCalendar component (VCALENDAR)
      */
     format(root: ical.Component): ical.Component {
+        const details = this.extractDetails(root);
+
         if (this.shouldReplaceProdID()) {
             root = this.replaceProdId(root);
         }
@@ -145,6 +180,9 @@ export abstract class Formatter {
         }
         if (this.shouldRewriteEventFields()) {
             root = this.rewriteEventFields(root);
+        }
+        if (this.shouldAddAdditionalEvents()) {
+            root = this.addAdditionalEvents(root, details);
         }
         if (this.shouldFixupUids()) {
             root = this.fixupUids(root, 'last');
@@ -169,6 +207,14 @@ export abstract class Formatter {
     }
 
     /**
+     * Get whether the formatter should add additional events
+     * @returns true if the formatter should add additional events
+     */
+    shouldAddAdditionalEvents(): boolean {
+        return this.extensionConfig !== undefined;
+    }
+
+    /**
      * Get whether the formatter should rewrite event fields
      * @returns true if the formatter should rewrite event fields
      */
@@ -182,6 +228,14 @@ export abstract class Formatter {
      */
     shouldFixupUids(): boolean {
         return this.uidFixupConfig !== undefined;
+    }
+
+    /**
+     * Sets the extension configuration for the formatter
+     * @param extensionConfig the extension configuration to use
+     */
+    setExtensions(extensionConfig: CalendarExtensionConfig) {
+        this.extensionConfig = extensionConfig;
     }
 
     /**
@@ -263,6 +317,89 @@ export abstract class Formatter {
         }
 
         return root;
+    }
+
+    /**
+     * Adds additional events to the iCalendar data based on the configured settings
+     * @param root the iCalendar component (VCALENDAR) to modify
+     * @param details the extracted details from the original iCalendar data
+     * @returns the modified iCalendar component (VCALENDAR)
+     */
+    addAdditionalEvents(root: ical.Component, details: ExtractedDetails): ical.Component {
+        if (this.extensionConfig?.customEvents) {
+            const useEscapeRules = this.extensionConfig.escapeSpecialCharacters ?? false;
+            for (const event of this.extensionConfig.customEvents) {
+                let skip = false;
+                for (const condition of event.conditions) {
+                    if (!this.checkCondition(root, condition)) {
+                        skip = true;
+                        break;
+                    }
+                }
+
+                if (skip) {
+                    continue;
+                }
+
+                const vevent = new ical.Component('vevent');
+                const uid = this.getUid(event, details);
+                vevent.addPropertyWithValue('uid', uid);
+                
+                vevent.addPropertyWithValue('dtstamp', event.dtstamp);
+                const dtstart = vevent.addPropertyWithValue('dtstart', ical.Time.fromDateTimeString(event.dtstart));
+                const dtend = vevent.addPropertyWithValue('dtend', ical.Time.fromDateTimeString(event.dtend));
+
+                if (event.tzid) {
+                    dtstart.setParameter('tzid', event.tzid);
+                    dtend.setParameter('tzid', event.tzid);
+                }
+
+                for (const [key, value] of Object.entries(event.properties)) {
+                    if (key !== 'uid') {
+                        vevent.addPropertyWithValue(key, useEscapeRules ? this.applyEscapeRules(value) : value);
+                    }
+                }
+
+                root.addSubcomponent(vevent);
+            }
+        }
+
+        return root;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    getUid(eventView: CustomEvent, _details: ExtractedDetails): string {
+        const data = `${eventView.dtstamp}${eventView.properties.summary}`;
+        return 'custom_' + this.hashContent(data);
+    }
+
+    checkCondition(root: ical.Component, condition: EventPredicate): boolean {
+        const vevents = root.getAllSubcomponents('vevent');
+        const veventCount = vevents.length;
+        let toMatch = condition.match == 'any' ? 1 : condition.match == 'all' ? veventCount : condition.match;
+        
+        for (let i = 0; i < veventCount && toMatch > 0 && toMatch <= veventCount - i; i++) {
+            if (testEventPredicate(vevents[i], condition)) {
+                toMatch--;
+            }
+        }
+
+        return toMatch == 0;
+    }
+
+    applyEscapeRules(src: string): string {
+        return src.replace(/\r\n/g, '\\n').replace(/\n/g, '\\n');
+    }
+
+    /**
+     * Uses the default hashing algorithm to hash the provided content
+     * @param content the content to hash
+     * @returns the hash
+     */
+    hashContent(content: string): string {
+        const hash = crypto.createHash('md5');
+        hash.update(content);
+        return hash.digest('hex');
     }
 
     /**
@@ -371,7 +508,7 @@ function collapseSelectedRecurrences(vevents: ical.Component[], settings: Recurr
             if (start) {
                 const matchRequirements = new Map<string, string | null>();
                 for (const key of settings.requiredMatchingKeys) {
-                    matchRequirements.set(key, vevent.getFirstPropertyValue(key));
+                    matchRequirements.set(key, vevent.getFirstPropertyValue(key)?.toString() ?? null);
                 }
 
                 const nextTime = getFutureOccurrenceTime(start, settings.frequency);
@@ -459,14 +596,13 @@ function rewriteComponent(component: ical.Component, settings: EventFieldRewrite
 
         // store property if not there
         if (!originalValuesLazy.has(propertyKey)) {
-            const originalValue = component.getFirstPropertyValue(propertyKey) ?? '';
+            const originalValue = component.getFirstPropertyValue(propertyKey)?.toString() ?? '';
             originalValuesLazy.set(propertyKey, originalValue);
         }
 
         const sourceKey = pattern.sourceKey;
         let sourceValue = pattern.useOriginalSourceValue ? originalValuesLazy.get(sourceKey) : undefined;
-        sourceValue ??= component.getFirstPropertyValue(sourceKey);
-        sourceValue ??= '';
+        sourceValue ??= (component.getFirstPropertyValue(sourceKey)?.toString() ?? '');
 
         const rewriter = pattern.rewriter;
         if ('format' in rewriter) {
@@ -475,5 +611,34 @@ function rewriteComponent(component: ical.Component, settings: EventFieldRewrite
         else {
             component.updatePropertyWithValue(propertyKey, sourceValue.replace(rewriter.regex, rewriter.replacement));
         }
+    }
+}
+
+function testEventPredicate(vevent: ical.Component, predicate: EventPredicate): boolean {
+    const propertyValue = vevent.getFirstPropertyValue(predicate.propertyKey);
+    if (!propertyValue) {
+        return false;
+    }
+
+    let valueString = propertyValue.toString();
+    let expectedValue = predicate.method.value;
+    if ('ignoreCase' in predicate.method && predicate.method.ignoreCase) {
+        valueString = valueString.toLowerCase();
+        expectedValue = expectedValue.toLowerCase();
+    }
+
+    switch (predicate.method.type) {
+        case 'equals':
+            return valueString === expectedValue;
+        case 'contains':
+            return valueString.includes(expectedValue);
+        case 'startsWith':
+            return valueString.startsWith(expectedValue);
+        case 'endsWith':
+            return valueString.endsWith(expectedValue);
+        case 'regex':
+            return new RegExp(expectedValue).test(valueString);
+        default:
+            return false;
     }
 }
