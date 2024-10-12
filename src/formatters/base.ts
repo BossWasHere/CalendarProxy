@@ -367,9 +367,14 @@ export abstract class Formatter {
         return root;
     }
 
+    propLookup(key: string, values: Record<string, string>, def: string = ''): string {
+        key = key.toLowerCase();
+        return values[Object.keys(values).find(k => k.toLowerCase() === key) ?? ''] ?? def;
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     getUid(eventView: CustomEvent, _details: ExtractedDetails): string {
-        const data = `${eventView.dtstamp}${eventView.properties.summary}`;
+        const data = `${eventView.dtstamp}${this.propLookup('summary', eventView.properties)}`;
         return 'custom_' + this.hashContent(data);
     }
 

@@ -73,7 +73,7 @@ export class DurFormatter extends Formatter {
     }
 
     override getUid(eventView: CustomEvent, details: ExtractedDetails) {
-        const data = `${eventView.dtstamp}${eventView.properties.summary}`;
+        const data = `${eventView.dtstamp}${this.propLookup('summary', eventView.properties)}`;
         const hashValue = this.hashContent(data).toUpperCase();
         return `${details.subject}_${hashValue}/CW`;
     }
